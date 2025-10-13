@@ -1,0 +1,5 @@
+comtypes
+pywin32
+pillow
+win32api
+win02con

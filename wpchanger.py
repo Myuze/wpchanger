@@ -104,45 +104,71 @@ class WallpaperRotator:
         """Set wallpaper for specific monitor"""
         try:
             abs_path = os.path.abspath(image_path)
-            # Set the wallpaper first
-            self.desktop_wallpaper.SetWallpaper(monitor_id, abs_path)
-            # Then set the position/fit mode (applies globally to all monitors)
+            # Set the position/fit mode FIRST (this is global)
             self.desktop_wallpaper.SetPosition(self.wallpaper_position)
+            # Then set the wallpaper
+            self.desktop_wallpaper.SetWallpaper(monitor_id, abs_path)
             return True
         except Exception as e:
             print(f"Error setting wallpaper: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def get_image_orientation(self, image_path):
         """Determine if image is portrait or landscape based on dimensions"""
         try:
             with Image.open(image_path) as img:
-                width, height = img.size
+                # Handle EXIF orientation - but do it quickly
+                try:
+                    # Check EXIF orientation tag
+                    exif = img.getexif()
+                    if exif:
+                        # 274 is the orientation tag
+                        orientation = exif.get(274)
+                        # If rotated 90 or 270 degrees, swap dimensions
+                        if orientation in [6, 8]:  # 6=90CW, 8=90CCW
+                            width, height = img.size
+                            width, height = height, width  # Swap
+                        else:
+                            width, height = img.size
+                    else:
+                        width, height = img.size
+                except:
+                    width, height = img.size
+
                 return 'Portrait' if height > width else 'Landscape'
         except Exception as e:
             print(f"Error reading image {image_path}: {e}")
             return None
 
-    def scan_images(self, directory):
+    def scan_images(self, directory, progress_callback=None):
         """Scan directory and subdirectories for image files"""
         image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff'}
         self.image_files = []
         self.portrait_images = []
         self.landscape_images = []
 
+        # First pass: collect all image paths (fast)
         for root, dirs, files in os.walk(directory):
             for file in files:
                 if Path(file).suffix.lower() in image_extensions:
                     full_path = os.path.join(root, file)
                     self.image_files.append(full_path)
 
-                    # Categorize by orientation if enabled
-                    if self.use_image_orientation:
-                        orientation = self.get_image_orientation(full_path)
-                        if orientation == 'Portrait':
-                            self.portrait_images.append(full_path)
-                        elif orientation == 'Landscape':
-                            self.landscape_images.append(full_path)
+        total = len(self.image_files)
+
+        # Second pass: categorize by orientation if enabled (slower)
+        if self.use_image_orientation and total > 0:
+            for idx, full_path in enumerate(self.image_files):
+                if progress_callback:
+                    progress_callback(idx, total)
+
+                orientation = self.get_image_orientation(full_path)
+                if orientation == 'Portrait':
+                    self.portrait_images.append(full_path)
+                elif orientation == 'Landscape':
+                    self.landscape_images.append(full_path)
 
         # Shuffle both lists
         random.shuffle(self.image_files)
@@ -422,9 +448,19 @@ class WallpaperRotatorGUI:
         # Load saved directory if exists
         if self.rotator.wallpaper_dir and os.path.exists(self.rotator.wallpaper_dir):
             self.dir_label.config(text=self.rotator.wallpaper_dir)
-            count = self.rotator.scan_images(self.rotator.wallpaper_dir)
-            self.image_count_label.config(text=f"Images found: {count}")
-            self.log(f"Loaded {count} images from saved directory")
+            self.log("Loading saved directory in background...")
+
+            # Load images in background to not freeze startup
+            def load_saved():
+                count = self.rotator.scan_images(self.rotator.wallpaper_dir)
+                self.image_count_label.config(text=f"Images found: {count}")
+                self.log(f"Loaded {count} images from saved directory")
+                if self.rotator.use_image_orientation:
+                    self.log(
+                        f"  Portrait: {len(self.rotator.portrait_images)}, Landscape: {len(self.rotator.landscape_images)}")
+
+            # Run in separate thread to avoid blocking
+            threading.Thread(target=load_saved, daemon=True).start()
 
     def on_monitor_toggle(self, monitor, var):
         """Handle monitor checkbox toggle"""
@@ -458,7 +494,15 @@ class WallpaperRotatorGUI:
             self.dir_label.config(text=directory)
 
             self.log("Scanning images...")
-            count = self.rotator.scan_images(directory)
+            self.root.update()  # Force UI update
+
+            # Progress callback
+            def update_progress(current, total):
+                if current % 10 == 0 or current == total - 1:  # Update every 10 images
+                    self.log(f"Processing images: {current + 1}/{total}")
+                    self.root.update()  # Keep UI responsive
+
+            count = self.rotator.scan_images(directory, update_progress)
             self.image_count_label.config(text=f"Images found: {count}")
 
             if count > 0:
@@ -516,15 +560,7 @@ class WallpaperRotatorGUI:
         self.rotator.wallpaper_position = self.position_options[position_name]
         self.rotator.save_config()
         self.log(f"Wallpaper fit mode set to: {position_name}")
-
-        # Apply the new position immediately if we have images
-        if self.rotator.image_files and self.rotator.active_monitors:
-            try:
-                self.rotator.desktop_wallpaper.SetPosition(
-                    self.rotator.wallpaper_position)
-                self.log("Fit mode applied to current wallpapers")
-            except Exception as e:
-                self.log(f"Error applying fit mode: {e}")
+        self.log("Click 'Change Now' to apply the new fit mode to wallpapers")
 
     def start_rotation(self):
         if not self.rotator.active_monitors:
