@@ -337,7 +337,12 @@ class WallpaperRotator:
         if not self.image_files or not self.active_monitors:
             return False
 
+        # Set all wallpapers as quickly as possible
+        # Note: Windows updates monitors sequentially - there's no way to prevent
+        # a brief flash when using per-monitor wallpapers with IDesktopWallpaper
         success = True
+        wallpapers_set = []
+
         for monitor_id, orientation in self.active_monitors.items():
             if monitor_id not in self.monitor_indices:
                 self.monitor_indices[monitor_id] = 0
@@ -361,24 +366,20 @@ class WallpaperRotator:
             index = index % len(image_list)
             image_path = image_list[index]
 
+            # Set wallpaper
             if self.set_wallpaper(monitor_id, image_path):
                 self.monitor_indices[monitor_id] = (
                     index + 1) % len(image_list)
+                wallpapers_set.append(monitor_id)
             else:
                 success = False
 
-        # Apply the wallpaper position/fit mode and force refresh
-        if success:
+        # Apply the wallpaper position/fit mode
+        if wallpapers_set:
             try:
-                # Set position and force Windows to apply it
+                # Set position
                 self.desktop_wallpaper.SetPosition(self.wallpaper_position)
                 print(f"Wallpaper fit mode set to: {self.wallpaper_position}")
-
-                # Toggle Enable to force the position change to apply
-                self.desktop_wallpaper.Enable(0)
-                time.sleep(0.05)
-                self.desktop_wallpaper.Enable(1)
-                print("Toggled wallpaper enable to apply position")
 
                 # Notify Windows of the change
                 SPI_SETDESKWALLPAPER = 20
@@ -391,7 +392,8 @@ class WallpaperRotator:
                     None,
                     SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
                 )
-                print("Desktop refresh triggered")
+                print(
+                    f"Wallpapers set on {len(wallpapers_set)} monitors")
 
             except Exception as e:
                 print(f"Error applying wallpaper settings: {e}")
