@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import random
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from ctypes import windll, c_wchar_p, c_uint, Structure, POINTER, byref, c_int
@@ -129,11 +130,14 @@ class WallpaperRotator:
         try:
             abs_path = os.path.abspath(image_path)
 
+            # Check if we need to rotate the image
+            rotated_path = self.prepare_image_for_monitor(monitor_id, abs_path)
+
             # Set the wallpaper for this specific monitor
-            self.desktop_wallpaper.SetWallpaper(monitor_id, abs_path)
+            self.desktop_wallpaper.SetWallpaper(monitor_id, rotated_path)
 
             # Store the last wallpaper path for refresh purposes
-            self.last_wallpaper_path = abs_path
+            self.last_wallpaper_path = rotated_path
 
             print(
                 f"Set wallpaper on monitor to: {os.path.basename(image_path)}")
@@ -143,6 +147,75 @@ class WallpaperRotator:
             import traceback
             traceback.print_exc()
             return False
+
+    def prepare_image_for_monitor(self, monitor_id, image_path):
+        """Rotate image if needed to match monitor orientation"""
+        try:
+            # Get monitor orientation
+            monitor_orientation = None
+            for monitor in self.monitors:
+                if monitor['id'] == monitor_id:
+                    monitor_orientation = monitor['orientation']
+                    break
+
+            if not monitor_orientation:
+                return image_path
+
+            # Check image orientation
+            with Image.open(image_path) as img:
+                # Handle EXIF orientation
+                try:
+                    exif = img.getexif()
+                    if exif:
+                        orientation = exif.get(274)
+                        if orientation in [6, 8]:  # Already rotated in EXIF
+                            width, height = img.height, img.width
+                        else:
+                            width, height = img.size
+                    else:
+                        width, height = img.size
+                except:
+                    width, height = img.size
+
+                image_orientation = 'Portrait' if height > width else 'Landscape'
+
+                # If portrait image on landscape monitor, rotate it 90 degrees left (counter-clockwise)
+                if image_orientation == 'Portrait' and monitor_orientation == 'Landscape':
+                    # Create rotated version
+                    temp_dir = os.path.join(os.path.dirname(
+                        image_path), '.wallpaper_temp')
+                    os.makedirs(temp_dir, exist_ok=True)
+
+                    rotated_filename = f"rotated_{os.path.basename(image_path)}"
+                    rotated_path = os.path.join(temp_dir, rotated_filename)
+
+                    # Load and rotate image
+                    img_copy = Image.open(image_path)
+
+                    # Apply EXIF rotation first if needed
+                    try:
+                        exif = img_copy.getexif()
+                        if exif and exif.get(274):
+                            # Auto-orient based on EXIF
+                            from PIL import ImageOps
+                            img_copy = ImageOps.exif_transpose(img_copy)
+                    except:
+                        pass
+
+                    # Rotate 90 degrees counter-clockwise (left)
+                    rotated_img = img_copy.rotate(90, expand=True)
+                    rotated_img.save(rotated_path, quality=95)
+                    img_copy.close()
+
+                    print(
+                        f"  Rotated portrait image for landscape monitor: {rotated_filename}")
+                    return rotated_path
+
+                return image_path
+
+        except Exception as e:
+            print(f"Error preparing image: {e}")
+            return image_path
 
     def refresh_desktop(self):
         """Force Windows to refresh the desktop wallpaper display"""
@@ -264,14 +337,6 @@ class WallpaperRotator:
         if not self.image_files or not self.active_monitors:
             return False
 
-        # Set the wallpaper position/fit mode ONCE before changing wallpapers
-        # This is a global setting that affects all monitors
-        try:
-            self.desktop_wallpaper.SetPosition(self.wallpaper_position)
-            print(f"Wallpaper fit mode set to: {self.wallpaper_position}")
-        except Exception as e:
-            print(f"Error setting position: {e}")
-
         success = True
         for monitor_id, orientation in self.active_monitors.items():
             if monitor_id not in self.monitor_indices:
@@ -302,101 +367,34 @@ class WallpaperRotator:
             else:
                 success = False
 
-        # After setting all monitors, force Windows to update the display
+        # Apply the wallpaper position/fit mode and force refresh
         if success:
             try:
-                # Method 1: Use SystemParametersInfoW with None to force refresh
+                # Set position and force Windows to apply it
+                self.desktop_wallpaper.SetPosition(self.wallpaper_position)
+                print(f"Wallpaper fit mode set to: {self.wallpaper_position}")
+
+                # Toggle Enable to force the position change to apply
+                self.desktop_wallpaper.Enable(0)
+                time.sleep(0.05)
+                self.desktop_wallpaper.Enable(1)
+                print("Toggled wallpaper enable to apply position")
+
+                # Notify Windows of the change
                 SPI_SETDESKWALLPAPER = 20
                 SPIF_UPDATEINIFILE = 0x01
                 SPIF_SENDCHANGE = 0x02
 
-                result = windll.user32.SystemParametersInfoW(
+                windll.user32.SystemParametersInfoW(
                     SPI_SETDESKWALLPAPER,
                     0,
                     None,
                     SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
                 )
-                print(
-                    f"Refresh desktop: SystemParametersInfoW result={result}")
-
-                # Method 2: Toggle the COM interface
-                try:
-                    self.desktop_wallpaper.Enable(0)
-                    time.sleep(0.05)
-                    self.desktop_wallpaper.Enable(1)
-                    print("Toggled IDesktopWallpaper Enable")
-                except Exception as e:
-                    print(f"Enable toggle failed: {e}")
-
-                # Method 3: Find and invalidate the desktop window to force redraw
-                try:
-                    # Find the Progman window (desktop)
-                    progman = win32gui.FindWindow("Progman", None)
-                    if progman:
-                        # Find the SHELLDLL_DefView window
-                        shelldll = win32gui.FindWindowEx(
-                            progman, 0, "SHELLDLL_DefView", None)
-                        if shelldll:
-                            # Find the SysListView32 window (actual desktop)
-                            syslistview = win32gui.FindWindowEx(
-                                shelldll, 0, "SysListView32", None)
-                            if syslistview:
-                                # Invalidate and force redraw
-                                win32gui.InvalidateRect(
-                                    syslistview, None, True)
-                                win32gui.UpdateWindow(syslistview)
-                                print("Invalidated desktop window for redraw")
-
-                        # Also try WorkerW windows (for multi-monitor)
-                        def enum_windows_callback(hwnd, results):
-                            if win32gui.GetClassName(hwnd) == "WorkerW":
-                                shelldll = win32gui.FindWindowEx(
-                                    hwnd, 0, "SHELLDLL_DefView", None)
-                                if shelldll:
-                                    syslistview = win32gui.FindWindowEx(
-                                        shelldll, 0, "SysListView32", None)
-                                    if syslistview:
-                                        win32gui.InvalidateRect(
-                                            syslistview, None, True)
-                                        win32gui.UpdateWindow(syslistview)
-                            return True
-
-                        win32gui.EnumWindows(enum_windows_callback, None)
-                        print("Enumerated and invalidated WorkerW windows")
-                except Exception as e:
-                    print(f"Desktop invalidate failed: {e}")
-
-                # Method 4: Broadcast setting change
-                HWND_BROADCAST = 0xFFFF
-                WM_SETTINGCHANGE = 0x001A
-                SMTO_ABORTIFHUNG = 0x0002
-                win32gui.SendMessageTimeout(
-                    HWND_BROADCAST,
-                    WM_SETTINGCHANGE,
-                    SPI_SETDESKWALLPAPER,
-                    "ImmersiveColorSet",
-                    SMTO_ABORTIFHUNG,
-                    1000
-                )
-                print("Sent WM_SETTINGCHANGE broadcast")
-
-                # Method 5: Simulate F5 keypress to refresh desktop
-                try:
-                    import win32com.client
-                    shell = win32com.client.Dispatch("WScript.Shell")
-                    # Focus desktop first
-                    progman = win32gui.FindWindow("Progman", None)
-                    if progman:
-                        win32gui.SetForegroundWindow(progman)
-                        time.sleep(0.1)
-                        # Send F5 to refresh
-                        shell.SendKeys("{F5}")
-                        print("Sent F5 keypress to desktop")
-                except Exception as e:
-                    print(f"F5 refresh failed: {e}")
+                print("Desktop refresh triggered")
 
             except Exception as e:
-                print(f"Error refreshing desktop: {e}")
+                print(f"Error applying wallpaper settings: {e}")
 
         return success
 
@@ -590,6 +588,23 @@ class WallpaperRotatorGUI:
         )
         fit_desc.pack(anchor='w')
 
+        # Add note about Windows Settings
+        fit_note = ttk.Label(
+            interval_frame,
+            text="Note: If this setting doesn't work, manually set 'Choose a fit' in Windows Settings > Personalization > Background",
+            font=('TkDefaultFont', 8),
+            foreground='orange',
+            wraplength=600
+        )
+        fit_note.pack(anchor='w', pady=(5, 0))
+
+        # Button to open Windows Settings
+        ttk.Button(
+            interval_frame,
+            text="Open Windows Personalization Settings",
+            command=self.open_windows_settings
+        ).pack(anchor='w', pady=(5, 0))
+
         # Control buttons
         control_frame = ttk.Frame(self.root, padding=10)
         control_frame.pack(fill='x', padx=10, pady=5)
@@ -704,10 +719,20 @@ class WallpaperRotatorGUI:
             self.rotator.save_config()
 
     def on_interval_change(self, event):
-        self.rotator.rotation_interval = self.interval_var.get()
-        self.rotator.save_config()
-        self.log(
-            f"Rotation interval set to {self.rotator.rotation_interval} minutes")
+        try:
+            interval = self.interval_var.get()
+            if interval < 1:
+                # Reset to minimum value if invalid
+                interval = 1
+                self.interval_var.set(interval)
+            self.rotator.rotation_interval = interval
+            self.rotator.save_config()
+            self.log(
+                f"Rotation interval set to {self.rotator.rotation_interval} minutes")
+        except (ValueError, tk.TclError):
+            # If empty or invalid, reset to current value
+            self.interval_var.set(self.rotator.rotation_interval)
+            self.log("Invalid interval value - keeping current setting")
 
     def on_orientation_mode_change(self):
         self.rotator.use_image_orientation = self.use_orientation_var.get()
@@ -734,6 +759,18 @@ class WallpaperRotatorGUI:
         self.rotator.save_config()
         self.log(f"Wallpaper fit mode set to: {position_name}")
         self.log("Click 'Change Now' to apply the new fit mode to wallpapers")
+
+    def open_windows_settings(self):
+        """Open Windows Personalization > Background settings"""
+        try:
+            import subprocess
+            subprocess.Popen(
+                "start ms-settings:personalization-background", shell=True)
+            self.log("Opening Windows Personalization settings...")
+        except Exception as e:
+            self.log(f"Error opening Windows Settings: {e}")
+            messagebox.showerror(
+                "Error", f"Could not open Windows Settings:\n{e}")
 
     def start_rotation(self):
         if not self.rotator.active_monitors:
