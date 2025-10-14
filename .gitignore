@@ -25,6 +25,7 @@ dist/
 *.swp
 *.swo
 *~
+.markdownlint.json
 
 # OS
 .DS_Store
