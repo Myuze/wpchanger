@@ -96,6 +96,7 @@ class WallpaperRotator:
         self.config_file = 'wallpaper_rotator_config.json'
         self.use_image_orientation = True  # New option
         self.wallpaper_position = DWPOS_FILL  # Default to Fill
+        self.last_wallpaper_path = None  # Track last set wallpaper for refresh
         self.load_config()
 
     def get_monitors(self):
@@ -128,31 +129,14 @@ class WallpaperRotator:
         try:
             abs_path = os.path.abspath(image_path)
 
-            # CRITICAL FIX: Set to empty/null first to force Windows to recognize change
-            try:
-                self.desktop_wallpaper.SetWallpaper(monitor_id, "")
-            except:
-                pass  # Empty string might fail, that's ok
-
-            # Set the position/fit mode
-            self.desktop_wallpaper.SetPosition(self.wallpaper_position)
-
-            # Now set the actual wallpaper
+            # Set the wallpaper for this specific monitor
             self.desktop_wallpaper.SetWallpaper(monitor_id, abs_path)
 
-            # Force immediate update using SystemParametersInfo for THIS specific image
-            SPI_SETDESKWALLPAPER = 20
-            SPIF_UPDATEINIFILE = 0x01
-            SPIF_SENDCHANGE = 0x02
-            windll.user32.SystemParametersInfoW(
-                SPI_SETDESKWALLPAPER,
-                0,
-                abs_path,  # Pass the actual image path
-                SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
-            )
+            # Store the last wallpaper path for refresh purposes
+            self.last_wallpaper_path = abs_path
 
             print(
-                f"Changed wallpaper on monitor to: {os.path.basename(image_path)}")
+                f"Set wallpaper on monitor to: {os.path.basename(image_path)}")
             return True
         except Exception as e:
             print(f"ERROR setting wallpaper: {e}")
@@ -259,15 +243,34 @@ class WallpaperRotator:
         random.shuffle(self.portrait_images)
         random.shuffle(self.landscape_images)
 
-        # Reset indices for all monitors
-        self.monitor_indices = {
-            monitor_id: 0 for monitor_id in self.active_monitors.keys()}
+        # Reset indices for all monitors with offset to ensure different images
+        # Group monitors by orientation and offset their starting indices
+        portrait_count = 0
+        landscape_count = 0
+        self.monitor_indices = {}
+
+        for monitor_id, orientation in self.active_monitors.items():
+            if orientation == 'Portrait':
+                self.monitor_indices[monitor_id] = portrait_count
+                portrait_count += 1
+            else:  # Landscape
+                self.monitor_indices[monitor_id] = landscape_count
+                landscape_count += 1
+
         return len(self.image_files)
 
     def rotate_wallpaper(self):
         """Rotate to next wallpaper for all active monitors"""
         if not self.image_files or not self.active_monitors:
             return False
+
+        # Set the wallpaper position/fit mode ONCE before changing wallpapers
+        # This is a global setting that affects all monitors
+        try:
+            self.desktop_wallpaper.SetPosition(self.wallpaper_position)
+            print(f"Wallpaper fit mode set to: {self.wallpaper_position}")
+        except Exception as e:
+            print(f"Error setting position: {e}")
 
         success = True
         for monitor_id, orientation in self.active_monitors.items():
@@ -299,44 +302,118 @@ class WallpaperRotator:
             else:
                 success = False
 
+        # After setting all monitors, force Windows to update the display
+        if success:
+            try:
+                # Method 1: Use SystemParametersInfoW with None to force refresh
+                SPI_SETDESKWALLPAPER = 20
+                SPIF_UPDATEINIFILE = 0x01
+                SPIF_SENDCHANGE = 0x02
+
+                result = windll.user32.SystemParametersInfoW(
+                    SPI_SETDESKWALLPAPER,
+                    0,
+                    None,
+                    SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
+                )
+                print(
+                    f"Refresh desktop: SystemParametersInfoW result={result}")
+
+                # Method 2: Toggle the COM interface
+                try:
+                    self.desktop_wallpaper.Enable(0)
+                    time.sleep(0.05)
+                    self.desktop_wallpaper.Enable(1)
+                    print("Toggled IDesktopWallpaper Enable")
+                except Exception as e:
+                    print(f"Enable toggle failed: {e}")
+
+                # Method 3: Find and invalidate the desktop window to force redraw
+                try:
+                    # Find the Progman window (desktop)
+                    progman = win32gui.FindWindow("Progman", None)
+                    if progman:
+                        # Find the SHELLDLL_DefView window
+                        shelldll = win32gui.FindWindowEx(
+                            progman, 0, "SHELLDLL_DefView", None)
+                        if shelldll:
+                            # Find the SysListView32 window (actual desktop)
+                            syslistview = win32gui.FindWindowEx(
+                                shelldll, 0, "SysListView32", None)
+                            if syslistview:
+                                # Invalidate and force redraw
+                                win32gui.InvalidateRect(
+                                    syslistview, None, True)
+                                win32gui.UpdateWindow(syslistview)
+                                print("Invalidated desktop window for redraw")
+
+                        # Also try WorkerW windows (for multi-monitor)
+                        def enum_windows_callback(hwnd, results):
+                            if win32gui.GetClassName(hwnd) == "WorkerW":
+                                shelldll = win32gui.FindWindowEx(
+                                    hwnd, 0, "SHELLDLL_DefView", None)
+                                if shelldll:
+                                    syslistview = win32gui.FindWindowEx(
+                                        shelldll, 0, "SysListView32", None)
+                                    if syslistview:
+                                        win32gui.InvalidateRect(
+                                            syslistview, None, True)
+                                        win32gui.UpdateWindow(syslistview)
+                            return True
+
+                        win32gui.EnumWindows(enum_windows_callback, None)
+                        print("Enumerated and invalidated WorkerW windows")
+                except Exception as e:
+                    print(f"Desktop invalidate failed: {e}")
+
+                # Method 4: Broadcast setting change
+                HWND_BROADCAST = 0xFFFF
+                WM_SETTINGCHANGE = 0x001A
+                SMTO_ABORTIFHUNG = 0x0002
+                win32gui.SendMessageTimeout(
+                    HWND_BROADCAST,
+                    WM_SETTINGCHANGE,
+                    SPI_SETDESKWALLPAPER,
+                    "ImmersiveColorSet",
+                    SMTO_ABORTIFHUNG,
+                    1000
+                )
+                print("Sent WM_SETTINGCHANGE broadcast")
+
+                # Method 5: Simulate F5 keypress to refresh desktop
+                try:
+                    import win32com.client
+                    shell = win32com.client.Dispatch("WScript.Shell")
+                    # Focus desktop first
+                    progman = win32gui.FindWindow("Progman", None)
+                    if progman:
+                        win32gui.SetForegroundWindow(progman)
+                        time.sleep(0.1)
+                        # Send F5 to refresh
+                        shell.SendKeys("{F5}")
+                        print("Sent F5 keypress to desktop")
+                except Exception as e:
+                    print(f"F5 refresh failed: {e}")
+
+            except Exception as e:
+                print(f"Error refreshing desktop: {e}")
+
         return success
 
-    def rotation_loop(self):
-        """Background thread for rotating wallpapers"""
-        # Change wallpaper immediately on start
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting wallpaper rotation")
-        self.rotate_wallpaper()
-        print(
-            f"[{datetime.now().strftime('%H:%M:%S')}] Next change in {self.rotation_interval} minutes")
-
-        while self.running:
-            # Sleep in small intervals to allow for quick stopping
-            sleep_seconds = self.rotation_interval * 60
-            for i in range(sleep_seconds):
-                if not self.running:
-                    break
-                time.sleep(1)
-
-            # Only rotate if still running after the sleep
-            if self.running:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Rotating wallpaper")
-                self.rotate_wallpaper()
-                print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] Next change in {self.rotation_interval} minutes")
-
     def start_rotation(self):
-        """Start the rotation thread"""
+        """Start the rotation (no thread needed - uses tkinter timer)"""
         if not self.running:
             self.running = True
-            self.rotation_thread = threading.Thread(
-                target=self.rotation_loop, daemon=True)
-            self.rotation_thread.start()
+            # Change wallpaper immediately on start
+            print(
+                f"[{datetime.now().strftime('%H:%M:%S')}] Starting wallpaper rotation")
+            self.rotate_wallpaper()
+            print(
+                f"[{datetime.now().strftime('%H:%M:%S')}] Next change in {self.rotation_interval} minutes")
 
     def stop_rotation(self):
-        """Stop the rotation thread"""
+        """Stop the rotation"""
         self.running = False
-        if self.rotation_thread:
-            self.rotation_thread.join(timeout=2)
 
     def save_config(self):
         """Save configuration to file"""
@@ -376,6 +453,7 @@ class WallpaperRotatorGUI:
         self.rotator = WallpaperRotator()
         self.monitor_checkboxes = []
         self.monitor_orientation_vars = []
+        self.rotation_timer_id = None  # Track timer for rotation
 
         self.create_widgets()
         self.update_status()
@@ -676,8 +754,35 @@ class WallpaperRotatorGUI:
                                   if m['id'] in self.rotator.active_monitors])
         self.log(f"Rotation started on: {monitor_list}")
 
+        # Schedule the next rotation using tkinter's timer (runs in main thread)
+        self._schedule_next_rotation()
+
+    def _schedule_next_rotation(self):
+        """Schedule the next rotation using tkinter's after() method"""
+        if self.rotator.running:
+            # Convert minutes to milliseconds
+            interval_ms = self.rotator.rotation_interval * 60 * 1000
+            self.rotation_timer_id = self.root.after(
+                interval_ms, self._do_rotation)
+
+    def _do_rotation(self):
+        """Perform rotation and schedule the next one"""
+        if self.rotator.running:
+            self.log(f"Rotating wallpaper automatically")
+            self.rotator.rotate_wallpaper()
+            self.log(
+                f"Next change in {self.rotator.rotation_interval} minutes")
+            # Schedule the next rotation
+            self._schedule_next_rotation()
+
     def stop_rotation(self):
         self.rotator.stop_rotation()
+
+        # Cancel the scheduled timer
+        if self.rotation_timer_id is not None:
+            self.root.after_cancel(self.rotation_timer_id)
+            self.rotation_timer_id = None
+
         self.start_button.config(state='normal')
         self.stop_button.config(state='disabled')
         self.log("Rotation stopped")
