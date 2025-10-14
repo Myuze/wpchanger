@@ -507,7 +507,7 @@ class WallpaperRotatorGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Multi-Monitor Wallpaper Rotator")
-        self.root.geometry("700x600")
+        self.root.geometry("750x700")
         self.rotator = WallpaperRotator()
         self.monitor_checkboxes = []
         self.monitor_orientation_vars = []
@@ -517,14 +517,56 @@ class WallpaperRotatorGUI:
         self.icon_image = None
         self.is_tray_active = False
 
+        # Create a PanedWindow to split controls and status area
+        # Using tk.PanedWindow instead of ttk for better sash visibility/draggability
+        self.paned_window = tk.PanedWindow(
+            self.root,
+            orient=tk.VERTICAL,
+            sashwidth=8,
+            sashrelief=tk.RAISED,
+            bg='#d0d0d0'
+        )
+        self.paned_window.pack(fill='both', expand=True)
+
+        # Create scrollable frame for controls
+        controls_container = ttk.Frame(self.paned_window)
+
+        self.main_canvas = tk.Canvas(controls_container, highlightthickness=0)
+        self.main_scrollbar = ttk.Scrollbar(
+            controls_container, orient="vertical", command=self.main_canvas.yview)
+        self.scrollable_frame = ttk.Frame(self.main_canvas)
+
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.main_canvas.configure(
+                scrollregion=self.main_canvas.bbox("all"))
+        )
+
+        self.main_canvas.create_window(
+            (0, 0), window=self.scrollable_frame, anchor="nw")
+        self.main_canvas.configure(yscrollcommand=self.main_scrollbar.set)
+
+        self.main_canvas.pack(side="left", fill="both", expand=True)
+        self.main_scrollbar.pack(side="right", fill="y")
+
+        # Enable mouse wheel scrolling
+        self.main_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+        # Add controls container to paned window
+        self.paned_window.add(controls_container, stretch="always")
+
         self.create_widgets()
         self.update_status()
         self.setup_tray_support()
 
+    def _on_mousewheel(self, event):
+        """Handle mouse wheel scrolling"""
+        self.main_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
     def create_widgets(self):
         # Monitor selection with orientation
         monitor_frame = ttk.LabelFrame(
-            self.root, text="Monitor Selection", padding=10)
+            self.scrollable_frame, text="Monitor Selection", padding=10)
         monitor_frame.pack(fill='x', padx=10, pady=5)
 
         ttk.Label(monitor_frame, text="Select monitors to rotate and specify their orientation:").pack(
@@ -571,7 +613,7 @@ class WallpaperRotatorGUI:
 
         # Directory selection
         dir_frame = ttk.LabelFrame(
-            self.root, text="Wallpaper Directory", padding=10)
+            self.scrollable_frame, text="Wallpaper Directory", padding=10)
         dir_frame.pack(fill='x', padx=10, pady=5)
 
         self.dir_label = ttk.Label(
@@ -587,7 +629,7 @@ class WallpaperRotatorGUI:
 
         # Rotation interval
         interval_frame = ttk.LabelFrame(
-            self.root, text="Rotation Settings", padding=10)
+            self.scrollable_frame, text="Rotation Settings", padding=10)
         interval_frame.pack(fill='x', padx=10, pady=5)
 
         ttk.Label(interval_frame, text="Rotation Interval (minutes):").pack(
@@ -656,7 +698,7 @@ class WallpaperRotatorGUI:
         # Add note about Windows Settings
         fit_note = ttk.Label(
             interval_frame,
-            text="Note: If this setting doesn't work, manually set 'Choose a fit' in Windows Settings > Personalization > Background",
+            text="Note: If this setting doesn't work (Likely in later versions of Windows), manually set 'Choose a fit' in Windows Settings > Personalization > Background",
             font=('TkDefaultFont', 8),
             foreground='orange',
             wraplength=600
@@ -671,7 +713,7 @@ class WallpaperRotatorGUI:
         ).pack(anchor='w', pady=(5, 0))
 
         # Control buttons
-        control_frame = ttk.Frame(self.root, padding=10)
+        control_frame = ttk.Frame(self.scrollable_frame, padding=10)
         control_frame.pack(fill='x', padx=10, pady=5)
 
         self.start_button = ttk.Button(
@@ -685,18 +727,27 @@ class WallpaperRotatorGUI:
         ttk.Button(control_frame, text="Change Now",
                    command=self.change_now).pack(side='left', padx=5)
 
-        # Status
-        status_frame = ttk.LabelFrame(self.root, text="Status", padding=10)
+        # Status area in separate pane (resizable by dragging divider)
+        status_container = ttk.Frame(self.paned_window)
+
+        status_frame = ttk.LabelFrame(
+            status_container, text="Status (Drag divider above to resize)", padding=5)
         status_frame.pack(fill='both', expand=True, padx=10, pady=5)
 
-        self.status_text = tk.Text(
-            status_frame, height=10, wrap='word', state='disabled')
-        self.status_text.pack(fill='both', expand=True)
-
-        scrollbar = ttk.Scrollbar(
-            self.status_text, command=self.status_text.yview)
+        # Pack scrollbar first (right side) so it's always visible
+        scrollbar = ttk.Scrollbar(status_frame)
         scrollbar.pack(side='right', fill='y')
-        self.status_text['yscrollcommand'] = scrollbar.set
+
+        # Then pack text widget to fill remaining space
+        self.status_text = tk.Text(
+            status_frame, wrap='word', state='disabled',
+            yscrollcommand=scrollbar.set)
+        self.status_text.pack(side='left', fill='both', expand=True)
+
+        scrollbar.config(command=self.status_text.yview)
+
+        # Add status container to paned window with minimum height
+        self.paned_window.add(status_container, minsize=100, stretch="always")
 
         # Load saved directory if exists
         if self.rotator.wallpaper_dir and os.path.exists(self.rotator.wallpaper_dir):
