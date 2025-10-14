@@ -12,11 +12,14 @@ with support for portrait/landscape orientation matching.
 -   ✅ **All orientations mode** - Allow portrait images on landscape monitors
     (and vice versa)
 -   ✅ **Automatic rotation** - Set custom intervals (minutes)
+-   ✅ **Auto-start on launch** - Optionally start rotation when app launches
 -   ✅ **Minimize to tray** - Runs in background, minimizes to system tray
+-   ✅ **Tray menu controls** - Start/stop rotation without opening window
 -   ✅ **Wallpaper fit options** - Fill, Fit, Stretch, Center, Tile, Span
 -   ✅ **Persistent settings** - Saves all your preferences
 -   ✅ **Resizable UI** - Drag divider to resize status window
 -   ✅ **Scrollable interface** - Access all controls easily
+-   ✅ **Automatic cleanup** - Temp folder managed automatically
 
 ## 🎯 Usage
 
@@ -61,7 +64,25 @@ For each monitor, you can configure:
 
 -   **Minimize button** → Hides to system tray
 -   **Double-click tray icon** → Restores window
--   **Right-click tray icon** → Menu with Restore/Exit options
+-   **Right-click tray icon** → Menu with options:
+
+**Tray Menu Options:**
+
+-   **Restore** - Opens the main window
+-   **Start/Stop Rotation** - Toggle rotation without opening window
+    (checkmark shows when active)
+-   **Auto-start on Launch** - Enable/disable auto-start feature
+    (checkmark shows when enabled)
+-   **Exit** - Closes the application
+
+### Auto-Start Feature
+
+When **Auto-start on Launch** is enabled:
+
+-   Rotation begins automatically when the app launches
+-   Works with your saved wallpaper directory and interval settings
+-   Perfect for "set it and forget it" operation
+-   Enable/disable from the tray menu at any time
 
 ### Resizable Interface
 
@@ -71,11 +92,47 @@ For each monitor, you can configure:
 
 ## 🔧 Installation Options
 
-### Run as Python Script
+### Option 1: Run as Python Script
 
 1. Navigate folder containing `wpchanger.py`
 2. Run `pip install -r requirements.txt` (if not done yet)
 3. Run `python wpchanger.py`
+
+### Option 2: Build Standalone Executable
+
+Build a standalone `.exe` file that doesn't require Python installed:
+
+#### Using PyInstaller
+
+1. Install PyInstaller:
+
+    ```bash
+    pip install pyinstaller
+    ```
+
+2. Build the executable:
+
+    ```bash
+    pyinstaller --onefile --windowed --icon=NONE ^
+      --add-data "README.md;." ^
+      --hidden-import=PIL._tkinter_finder ^
+      --collect-all=pystray ^
+      wpchanger.py
+    ```
+
+3. Find your executable in `dist/wpchanger.exe`
+
+**PyInstaller options explained:**
+
+-   `--onefile` - Creates a single executable file
+-   `--windowed` - No console window (GUI only)
+-   `--icon=NONE` - No custom icon (use default)
+-   `--add-data` - Include additional files
+-   `--hidden-import` - Include PIL tkinter support
+-   `--collect-all=pystray` - Include all pystray dependencies
+
+**Note:** The first run may take a moment as PyInstaller unpacks files to a
+temp directory.
 
 ## 📁 Project Files
 
@@ -112,15 +169,23 @@ Settings are automatically saved in `wallpaper_rotator_config.json`:
 -   Active monitors
 -   Wallpaper directory
 -   Rotation interval
+-   Auto-start on launch preference
 -   Orientation matching mode
 -   Wallpaper fit preference
 -   Per-monitor "All orientations" settings
 -   Per-monitor rotation direction preferences
 
+The config file is created automatically on first run and updated whenever you
+change settings.
+
 ## 💡 Tips
 
 -   **Wallpaper fit not working?** - Use "Open Windows Personalization Settings"
     button
+-   **Temp folder cleanup** - Rotated images are automatically cleaned up to
+    prevent disk space accumulation
+-   **Set it and forget it** - Enable auto-start, minimize to tray, and let it
+    run in the background
 
 ## 📝 License
 
