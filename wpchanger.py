@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import random
+from datetime import datetime
 from pathlib import Path
 from ctypes import windll, c_wchar_p, c_uint, Structure, POINTER, byref, c_int
 from ctypes.wintypes import UINT, RECT
@@ -10,6 +11,7 @@ from comtypes import GUID, COMMETHOD
 from comtypes.hresult import S_OK
 import win32api
 import win32con
+import win32gui
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -42,6 +44,27 @@ class IDesktopWallpaper(comtypes.IUnknown):
                   (['in'], c_int, 'position')),
         COMMETHOD([], UINT, 'GetPosition',
                   (['out'], POINTER(c_int), 'position')),
+        COMMETHOD([], UINT, 'SetBackgroundColor',
+                  (['in'], c_uint, 'color')),
+        COMMETHOD([], UINT, 'GetBackgroundColor',
+                  (['out'], POINTER(c_uint), 'color')),
+        COMMETHOD([], UINT, 'SetSlideshow',
+                  (['in'], POINTER(comtypes.IUnknown), 'items')),
+        COMMETHOD([], UINT, 'GetSlideshow',
+                  (['out'], POINTER(POINTER(comtypes.IUnknown)), 'items')),
+        COMMETHOD([], UINT, 'SetSlideshowOptions',
+                  (['in'], c_uint, 'options'),
+                  (['in'], c_uint, 'slideshowTick')),
+        COMMETHOD([], UINT, 'GetSlideshowOptions',
+                  (['out'], POINTER(c_uint), 'options'),
+                  (['out'], POINTER(c_uint), 'slideshowTick')),
+        COMMETHOD([], UINT, 'AdvanceSlideshow',
+                  (['in'], c_wchar_p, 'monitorID'),
+                  (['in'], c_int, 'direction')),
+        COMMETHOD([], UINT, 'GetStatus',
+                  (['out'], POINTER(c_int), 'state')),
+        COMMETHOD([], UINT, 'Enable',
+                  (['in'], c_int, 'enable')),
     ]
 
 
@@ -104,16 +127,77 @@ class WallpaperRotator:
         """Set wallpaper for specific monitor"""
         try:
             abs_path = os.path.abspath(image_path)
-            # Set the position/fit mode FIRST (this is global)
+
+            # CRITICAL FIX: Set to empty/null first to force Windows to recognize change
+            try:
+                self.desktop_wallpaper.SetWallpaper(monitor_id, "")
+            except:
+                pass  # Empty string might fail, that's ok
+
+            # Set the position/fit mode
             self.desktop_wallpaper.SetPosition(self.wallpaper_position)
-            # Then set the wallpaper
+
+            # Now set the actual wallpaper
             self.desktop_wallpaper.SetWallpaper(monitor_id, abs_path)
+
+            # Force immediate update using SystemParametersInfo for THIS specific image
+            SPI_SETDESKWALLPAPER = 20
+            SPIF_UPDATEINIFILE = 0x01
+            SPIF_SENDCHANGE = 0x02
+            windll.user32.SystemParametersInfoW(
+                SPI_SETDESKWALLPAPER,
+                0,
+                abs_path,  # Pass the actual image path
+                SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
+            )
+
+            print(
+                f"Changed wallpaper on monitor to: {os.path.basename(image_path)}")
             return True
         except Exception as e:
-            print(f"Error setting wallpaper: {e}")
+            print(f"ERROR setting wallpaper: {e}")
             import traceback
             traceback.print_exc()
             return False
+
+    def refresh_desktop(self):
+        """Force Windows to refresh the desktop wallpaper display"""
+        try:
+            # Method 1: Use SystemParametersInfo to force wallpaper update
+            SPI_SETDESKWALLPAPER = 20
+            SPIF_UPDATEINIFILE = 0x01
+            SPIF_SENDCHANGE = 0x02
+
+            # Pass None to refresh current wallpaper settings
+            result = windll.user32.SystemParametersInfoW(
+                SPI_SETDESKWALLPAPER,
+                0,
+                None,
+                SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
+            )
+            print(f"DEBUG: SystemParametersInfo called, result: {result}")
+
+            # Method 2: Broadcast setting change
+            HWND_BROADCAST = 0xFFFF
+            WM_SETTINGCHANGE = 0x001A
+            SMTO_ABORTIFHUNG = 0x0002
+            win32gui.SendMessageTimeout(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                SPI_SETDESKWALLPAPER,
+                "ImmersiveColorSet",
+                SMTO_ABORTIFHUNG,
+                5000
+            )
+            print(f"DEBUG: Desktop refresh broadcast sent")
+
+            # Small delay to let Windows process
+            time.sleep(0.1)
+
+        except Exception as e:
+            print(f"DEBUG: Error refreshing desktop: {e}")
+            import traceback
+            traceback.print_exc()
 
     def get_image_orientation(self, image_path):
         """Determine if image is portrait or landscape based on dimensions"""
@@ -212,8 +296,6 @@ class WallpaperRotator:
             if self.set_wallpaper(monitor_id, image_path):
                 self.monitor_indices[monitor_id] = (
                     index + 1) % len(image_list)
-                print(
-                    f"Changed wallpaper on {orientation} monitor to: {os.path.basename(image_path)}")
             else:
                 success = False
 
@@ -221,13 +303,26 @@ class WallpaperRotator:
 
     def rotation_loop(self):
         """Background thread for rotating wallpapers"""
+        # Change wallpaper immediately on start
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting wallpaper rotation")
+        self.rotate_wallpaper()
+        print(
+            f"[{datetime.now().strftime('%H:%M:%S')}] Next change in {self.rotation_interval} minutes")
+
         while self.running:
-            self.rotate_wallpaper()
             # Sleep in small intervals to allow for quick stopping
-            for _ in range(self.rotation_interval * 60):
+            sleep_seconds = self.rotation_interval * 60
+            for i in range(sleep_seconds):
                 if not self.running:
                     break
                 time.sleep(1)
+
+            # Only rotate if still running after the sleep
+            if self.running:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Rotating wallpaper")
+                self.rotate_wallpaper()
+                print(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] Next change in {self.rotation_interval} minutes")
 
     def start_rotation(self):
         """Start the rotation thread"""
