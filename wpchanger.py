@@ -108,6 +108,7 @@ class WallpaperRotator:
         self.wallpaper_position = DWPOS_FILL  # Default to Fill
         self.last_wallpaper_path = None  # Track last set wallpaper for refresh
         self.current_rotated_images = set()  # Track currently used rotated images
+        self.auto_start_rotation = False  # Auto-start rotation on app launch
         self.load_config()
 
     def get_monitors(self):
@@ -599,7 +600,8 @@ class WallpaperRotator:
             'monitor_rotation_direction': self.monitor_rotation_direction,
             'rotation_interval': self.rotation_interval,
             'use_image_orientation': self.use_image_orientation,
-            'wallpaper_position': self.wallpaper_position
+            'wallpaper_position': self.wallpaper_position,
+            'auto_start_rotation': self.auto_start_rotation
         }
         with open(self.config_file, 'w') as f:
             json.dump(config, f)
@@ -622,6 +624,8 @@ class WallpaperRotator:
                         'use_image_orientation', True)
                     self.wallpaper_position = config.get(
                         'wallpaper_position', DWPOS_FILL)
+                    self.auto_start_rotation = config.get(
+                        'auto_start_rotation', False)
         except Exception as e:
             print(f"Error loading config: {e}")
 
@@ -681,6 +685,12 @@ class WallpaperRotatorGUI:
         self.create_widgets()
         self.update_status()
         self.setup_tray_support()
+
+        # Auto-start rotation if configured
+        if self.rotator.auto_start_rotation and self.rotator.wallpaper_dir:
+            self.log("Auto-starting rotation on launch...")
+            # Delay slightly to ensure GUI is ready
+            self.root.after(500, self.start_rotation)
 
     def _on_mousewheel(self, event):
         """Handle mouse wheel scrolling"""
@@ -1175,9 +1185,21 @@ class WallpaperRotatorGUI:
 
         if self.tray_icon is None:
             try:
-                # Create menu with restore as default action
+                # Create menu with restore as default action and rotation toggle
                 menu = pystray.Menu(
                     item('Restore', self.restore_window, default=True),
+                    pystray.Menu.SEPARATOR,
+                    item(
+                        'Start Rotation' if not self.rotator.running else 'Stop Rotation',
+                        self.toggle_rotation_from_tray,
+                        checked=lambda item: self.rotator.running
+                    ),
+                    item(
+                        'Auto-start on Launch',
+                        self.toggle_auto_start,
+                        checked=lambda item: self.rotator.auto_start_rotation
+                    ),
+                    pystray.Menu.SEPARATOR,
                     item('Exit', self.exit_app)
                 )
                 self.tray_icon = pystray.Icon(
@@ -1193,6 +1215,32 @@ class WallpaperRotatorGUI:
             except Exception as e:
                 # If tray icon fails, log it to the status window
                 self.log(f"Error creating tray icon: {e}")
+
+    def toggle_rotation_from_tray(self, icon=None, item=None):
+        """Toggle rotation on/off from tray menu"""
+        if self.rotator.running:
+            self.stop_rotation()
+        else:
+            self.start_rotation()
+        # Update tray menu to reflect new state
+        if self.tray_icon:
+            self.tray_icon.stop()
+            self.is_tray_active = False
+            self.tray_icon = None
+            self.show_tray_icon()
+
+    def toggle_auto_start(self, icon=None, item=None):
+        """Toggle auto-start rotation on launch"""
+        self.rotator.auto_start_rotation = not self.rotator.auto_start_rotation
+        self.rotator.save_config()
+        status = "enabled" if self.rotator.auto_start_rotation else "disabled"
+        self.log(f"Auto-start rotation {status}")
+        # Update tray menu to reflect new state
+        if self.tray_icon:
+            self.tray_icon.stop()
+            self.is_tray_active = False
+            self.tray_icon = None
+            self.show_tray_icon()
 
     def restore_window(self, icon=None, item=None):
         """Restore the window from tray"""
