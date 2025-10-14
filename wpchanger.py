@@ -107,6 +107,7 @@ class WallpaperRotator:
         self.use_image_orientation = True  # New option
         self.wallpaper_position = DWPOS_FILL  # Default to Fill
         self.last_wallpaper_path = None  # Track last set wallpaper for refresh
+        self.current_rotated_images = set()  # Track currently used rotated images
         self.load_config()
 
     def get_monitors(self):
@@ -230,6 +231,9 @@ class WallpaperRotator:
                     rotated_img.save(rotated_path, quality=95)
                     img_copy.close()
 
+                    # Track this rotated image as currently in use
+                    self.current_rotated_images.add(rotated_path)
+
                     print(
                         f"  Rotated {image_orientation} image {rotation_direction} for {monitor_orientation} monitor: {rotated_filename}")
                     return rotated_path
@@ -239,6 +243,40 @@ class WallpaperRotator:
         except Exception as e:
             print(f"Error preparing image: {e}")
             return image_path
+
+    def cleanup_temp_images(self):
+        """Clean up old rotated images that are no longer in use"""
+        try:
+            if not self.wallpaper_dir:
+                return
+
+            temp_dir = os.path.join(self.wallpaper_dir, '.wallpaper_temp')
+            if not os.path.exists(temp_dir):
+                return
+
+            # Get all files in temp directory
+            temp_files = []
+            for file in os.listdir(temp_dir):
+                file_path = os.path.join(temp_dir, file)
+                if os.path.isfile(file_path):
+                    temp_files.append(file_path)
+
+            # Delete files that are not currently in use
+            deleted_count = 0
+            for file_path in temp_files:
+                if file_path not in self.current_rotated_images:
+                    try:
+                        os.remove(file_path)
+                        deleted_count += 1
+                    except Exception as e:
+                        print(f"Could not delete temp file {file_path}: {e}")
+
+            if deleted_count > 0:
+                print(
+                    f"Cleaned up {deleted_count} old rotated images from temp folder")
+
+        except Exception as e:
+            print(f"Error cleaning up temp images: {e}")
 
     def refresh_desktop(self):
         """Force Windows to refresh the desktop wallpaper display"""
@@ -376,6 +414,11 @@ class WallpaperRotator:
         """Rotate to next wallpaper for all active monitors"""
         if not self.image_files or not self.active_monitors:
             return False
+
+        # Clean up old rotated images before creating new ones
+        # Clear the current set so we can track new rotated images
+        self.cleanup_temp_images()
+        self.current_rotated_images.clear()
 
         # Set all wallpapers as quickly as possible
         # Note: Windows updates monitors sequentially - there's no way to prevent
@@ -544,6 +587,8 @@ class WallpaperRotator:
     def stop_rotation(self):
         """Stop the rotation"""
         self.running = False
+        # Clean up temp images when stopping
+        self.cleanup_temp_images()
 
     def save_config(self):
         """Save configuration to file"""
@@ -1161,6 +1206,8 @@ class WallpaperRotatorGUI:
 
     def exit_app(self, icon=None, item=None):
         """Exit the application"""
+        # Clean up temp images on exit
+        self.rotator.cleanup_temp_images()
         if self.tray_icon:
             self.tray_icon.stop()
         self.root.destroy()
