@@ -1,3 +1,17 @@
+from pystray import MenuItem as item
+import pystray
+from PIL import Image
+import json
+from tkinter import ttk, filedialog, messagebox
+import tkinter as tk
+import threading
+import win32gui
+import win32con
+import win32api
+from comtypes.hresult import S_OK
+from comtypes import GUID, COMMETHOD
+import comtypes.client
+from ctypes.wintypes import UINT, RECT
 import os
 import sys
 import time
@@ -6,18 +20,9 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 from ctypes import windll, c_wchar_p, c_uint, Structure, POINTER, byref, c_int
-from ctypes.wintypes import UINT, RECT
-import comtypes.client
-from comtypes import GUID, COMMETHOD
-from comtypes.hresult import S_OK
-import win32api
-import win32con
-import win32gui
-import threading
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import json
-from PIL import Image
+
+# Ensure random is properly seeded (important for PyInstaller builds)
+random.seed()
 
 # IDesktopWallpaper interface definitions
 CLSID_DesktopWallpaper = GUID('{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}')
@@ -311,10 +316,12 @@ class WallpaperRotator:
                 elif orientation == 'Landscape':
                     self.landscape_images.append(full_path)
 
-        # Shuffle both lists
+        # Shuffle both lists - use time-based seed for extra randomness
         random.shuffle(self.image_files)
-        random.shuffle(self.portrait_images)
-        random.shuffle(self.landscape_images)
+        if self.portrait_images:
+            random.shuffle(self.portrait_images)
+        if self.landscape_images:
+            random.shuffle(self.landscape_images)
 
         # Reset indices for all monitors with offset to ensure different images
         # Group monitors by orientation and offset their starting indices
@@ -322,12 +329,27 @@ class WallpaperRotator:
         landscape_count = 0
         self.monitor_indices = {}
 
-        for monitor_id, orientation in self.active_monitors.items():
+        # Sort monitor IDs to ensure consistent ordering
+        sorted_monitors = sorted(self.active_monitors.items())
+
+        for monitor_id, orientation in sorted_monitors:
             if orientation == 'Portrait':
-                self.monitor_indices[monitor_id] = portrait_count
+                # Ensure each portrait monitor gets a different starting image
+                image_list_len = len(
+                    self.portrait_images) if self.portrait_images else len(self.image_files)
+                if image_list_len > 0:
+                    self.monitor_indices[monitor_id] = portrait_count % image_list_len
+                else:
+                    self.monitor_indices[monitor_id] = 0
                 portrait_count += 1
             else:  # Landscape
-                self.monitor_indices[monitor_id] = landscape_count
+                # Ensure each landscape monitor gets a different starting image
+                image_list_len = len(
+                    self.landscape_images) if self.landscape_images else len(self.image_files)
+                if image_list_len > 0:
+                    self.monitor_indices[monitor_id] = landscape_count % image_list_len
+                else:
+                    self.monitor_indices[monitor_id] = 0
                 landscape_count += 1
 
         return len(self.image_files)
@@ -343,9 +365,45 @@ class WallpaperRotator:
         success = True
         wallpapers_set = []
 
+        # Initialize indices for any monitors that don't have them yet
+        # This ensures each monitor gets a unique starting position
+        if not self.monitor_indices:
+            portrait_count = 0
+            landscape_count = 0
+            sorted_monitors = sorted(self.active_monitors.items())
+
+            for mon_id, mon_orientation in sorted_monitors:
+                if mon_orientation == 'Portrait':
+                    image_list_len = len(
+                        self.portrait_images) if self.portrait_images else len(self.image_files)
+                    self.monitor_indices[mon_id] = portrait_count % max(
+                        image_list_len, 1)
+                    portrait_count += 1
+                else:
+                    image_list_len = len(
+                        self.landscape_images) if self.landscape_images else len(self.image_files)
+                    self.monitor_indices[mon_id] = landscape_count % max(
+                        image_list_len, 1)
+                    landscape_count += 1
+
         for monitor_id, orientation in self.active_monitors.items():
+            # If a specific monitor is missing an index, assign a random one to ensure uniqueness
             if monitor_id not in self.monitor_indices:
-                self.monitor_indices[monitor_id] = 0
+                # Select appropriate image list
+                if self.use_image_orientation:
+                    if orientation == 'Portrait':
+                        temp_list = self.portrait_images if self.portrait_images else self.image_files
+                    else:
+                        temp_list = self.landscape_images if self.landscape_images else self.image_files
+                else:
+                    temp_list = self.image_files
+
+                # Assign a random starting index
+                if temp_list:
+                    self.monitor_indices[monitor_id] = random.randint(
+                        0, len(temp_list) - 1)
+                else:
+                    self.monitor_indices[monitor_id] = 0
 
             # Select appropriate image list based on mode
             if self.use_image_orientation:
@@ -455,8 +513,13 @@ class WallpaperRotatorGUI:
         self.monitor_orientation_vars = []
         self.rotation_timer_id = None  # Track timer for rotation
 
+        self.tray_icon = None
+        self.icon_image = None
+        self.is_tray_active = False
+
         self.create_widgets()
         self.update_status()
+        self.setup_tray_support()
 
     def create_widgets(self):
         # Monitor selection with orientation
@@ -849,6 +912,80 @@ class WallpaperRotatorGUI:
     def update_status(self):
         # Update status periodically
         self.root.after(1000, self.update_status)
+
+    def setup_tray_support(self):
+        """Setup system tray icon support"""
+        # Bind close event
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        # Bind iconify (minimize) event - use after_idle to check state after event completes
+        self.root.bind("<Unmap>", self.check_minimized)
+
+    def check_minimized(self, event):
+        """Check if window was actually minimized (not just unmapped for other reasons)"""
+        # Use after_idle to check state after the event has been fully processed
+        self.root.after_idle(self._check_if_iconic)
+
+    def _check_if_iconic(self):
+        """Check if window is in iconic (minimized) state"""
+        try:
+            if self.root.state() == 'iconic' and not self.is_tray_active:
+                self.show_tray_icon()
+                self.root.withdraw()  # Hide from taskbar
+        except Exception as e:
+            pass  # Silently handle any state checking errors
+
+    def on_close(self):
+        """Minimize to tray instead of closing"""
+        if not self.is_tray_active:
+            self.show_tray_icon()
+        self.root.withdraw()  # Hide window completely
+
+    def show_tray_icon(self):
+        """Create and show the system tray icon"""
+        # Create tray icon image (use a simple colored square if no icon)
+        if not self.icon_image:
+            try:
+                self.icon_image = Image.new(
+                    'RGB', (64, 64), color=(70, 130, 180))
+            except Exception:
+                self.icon_image = None
+
+        if self.tray_icon is None:
+            try:
+                # Create menu with restore as default action
+                menu = pystray.Menu(
+                    item('Restore', self.restore_window, default=True),
+                    item('Exit', self.exit_app)
+                )
+                self.tray_icon = pystray.Icon(
+                    "WallpaperChanger",
+                    self.icon_image,
+                    "Wallpaper Changer",
+                    menu
+                )
+                self.is_tray_active = True
+                # Start tray icon in separate thread
+                threading.Thread(target=self.tray_icon.run,
+                                 daemon=True).start()
+            except Exception as e:
+                # If tray icon fails, log it to the status window
+                self.log(f"Error creating tray icon: {e}")
+
+    def restore_window(self, icon=None, item=None):
+        """Restore the window from tray"""
+        self.is_tray_active = False
+        if self.tray_icon:
+            self.tray_icon.stop()
+            self.tray_icon = None
+        self.root.deiconify()
+        self.root.after(100, self.root.lift)
+        self.root.focus_force()
+
+    def exit_app(self, icon=None, item=None):
+        """Exit the application"""
+        if self.tray_icon:
+            self.tray_icon.stop()
+        self.root.destroy()
 
 
 if __name__ == '__main__':

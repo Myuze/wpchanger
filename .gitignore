@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist-info/
+.eggs/
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# PyInstaller build files
+build/
+dist/
+*.spec
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Application specific
+*.lnk
+wallpaper_rotator_config.json
+.wallpaper_temp/
+
+# Shortcut and build helper scripts
+create_shortcut.py
+create_exe_shortcut.py
+build_exe.py
+WallpaperChanger.bat
+
+# Installation guides (optional - keep only the main README)
+INSTALLATION.md
+
+# Compiled executables
+*.exe
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Test files
+test_*.py
