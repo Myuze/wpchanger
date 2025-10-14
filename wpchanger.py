@@ -91,6 +91,10 @@ class WallpaperRotator:
         )
         self.monitors = self.get_monitors()
         self.active_monitors = {}  # {monitor_id: orientation}
+        # {monitor_id: bool} - Allow all image orientations
+        self.monitor_allow_all_orientations = {}
+        # {monitor_id: 'left'|'right'} - Rotation direction for mismatched orientations
+        self.monitor_rotation_direction = {}
         self.wallpaper_dir = None
         self.image_files = []
         self.portrait_images = []
@@ -184,14 +188,24 @@ class WallpaperRotator:
 
                 image_orientation = 'Portrait' if height > width else 'Landscape'
 
-                # If portrait image on landscape monitor, rotate it 90 degrees left (counter-clockwise)
-                if image_orientation == 'Portrait' and monitor_orientation == 'Landscape':
+                # If portrait image on landscape monitor OR landscape image on portrait monitor, rotate it
+                if image_orientation != monitor_orientation:
+                    # Get rotation direction for this monitor
+                    rotation_direction = self.monitor_rotation_direction.get(
+                        monitor_id, 'none')
+
+                    # If rotation is set to 'none', don't rotate - use original orientation
+                    if rotation_direction == 'none':
+                        print(
+                            f"  No rotation applied - using image in default orientation")
+                        return image_path
+
                     # Create rotated version
                     temp_dir = os.path.join(os.path.dirname(
                         image_path), '.wallpaper_temp')
                     os.makedirs(temp_dir, exist_ok=True)
 
-                    rotated_filename = f"rotated_{os.path.basename(image_path)}"
+                    rotated_filename = f"rotated_{rotation_direction}_{os.path.basename(image_path)}"
                     rotated_path = os.path.join(temp_dir, rotated_filename)
 
                     # Load and rotate image
@@ -207,13 +221,17 @@ class WallpaperRotator:
                     except:
                         pass
 
-                    # Rotate 90 degrees counter-clockwise (left)
-                    rotated_img = img_copy.rotate(90, expand=True)
+                    # Rotate based on direction: left = 90° counter-clockwise, right = 270° counter-clockwise (or -90°)
+                    if rotation_direction == 'left':
+                        rotated_img = img_copy.rotate(90, expand=True)
+                    else:  # right
+                        rotated_img = img_copy.rotate(-90, expand=True)
+
                     rotated_img.save(rotated_path, quality=95)
                     img_copy.close()
 
                     print(
-                        f"  Rotated portrait image for landscape monitor: {rotated_filename}")
+                        f"  Rotated {image_orientation} image {rotation_direction} for {monitor_orientation} monitor: {rotated_filename}")
                     return rotated_path
 
                 return image_path
@@ -366,34 +384,61 @@ class WallpaperRotator:
         wallpapers_set = []
 
         # Initialize indices for any monitors that don't have them yet
-        # This ensures each monitor gets a unique starting position
+        # Use random indices to ensure each monitor gets a different random image
         if not self.monitor_indices:
-            portrait_count = 0
-            landscape_count = 0
+            used_image_paths = set()
             sorted_monitors = sorted(self.active_monitors.items())
 
             for mon_id, mon_orientation in sorted_monitors:
-                if mon_orientation == 'Portrait':
-                    image_list_len = len(
-                        self.portrait_images) if self.portrait_images else len(self.image_files)
-                    self.monitor_indices[mon_id] = portrait_count % max(
-                        image_list_len, 1)
-                    portrait_count += 1
+                allow_all = self.monitor_allow_all_orientations.get(
+                    mon_id, False)
+
+                # Determine which image list to use
+                if allow_all:
+                    temp_list = self.image_files
+                elif self.use_image_orientation:
+                    if mon_orientation == 'Portrait':
+                        temp_list = self.portrait_images if self.portrait_images else self.image_files
+                    else:
+                        temp_list = self.landscape_images if self.landscape_images else self.image_files
                 else:
-                    image_list_len = len(
-                        self.landscape_images) if self.landscape_images else len(self.image_files)
-                    self.monitor_indices[mon_id] = landscape_count % max(
-                        image_list_len, 1)
-                    landscape_count += 1
+                    temp_list = self.image_files
+
+                # Assign a random index, trying to avoid using the same image file
+                if temp_list:
+                    list_len = len(temp_list)
+                    # Try to get a unique image (not already used by another monitor)
+                    attempts = 0
+                    # Try up to 50 times or list length
+                    while attempts < min(50, list_len):
+                        idx = random.randint(0, list_len - 1)
+                        image_path = temp_list[idx]
+                        # Check if this image has already been assigned to another monitor
+                        if image_path not in used_image_paths or attempts >= min(49, list_len - 1):
+                            used_image_paths.add(image_path)
+                            self.monitor_indices[mon_id] = idx
+                            break
+                        attempts += 1
+                else:
+                    self.monitor_indices[mon_id] = 0
+
+        # Track which images are being used in this rotation to avoid duplicates
+        images_being_used = {}  # {monitor_id: image_path}
 
         for monitor_id, orientation in self.active_monitors.items():
             # If a specific monitor is missing an index, assign a random one to ensure uniqueness
             if monitor_id not in self.monitor_indices:
+                allow_all = self.monitor_allow_all_orientations.get(
+                    monitor_id, False)
+
                 # Select appropriate image list
-                if self.use_image_orientation:
+                if allow_all:
+                    temp_list = self.image_files
+                elif self.use_image_orientation:
                     if orientation == 'Portrait':
                         temp_list = self.portrait_images if self.portrait_images else self.image_files
                     else:
+                        # Landscape monitors use landscape images only (unless allow_all is checked)
                         temp_list = self.landscape_images if self.landscape_images else self.image_files
                 else:
                     temp_list = self.image_files
@@ -405,12 +450,19 @@ class WallpaperRotator:
                 else:
                     self.monitor_indices[monitor_id] = 0
 
-            # Select appropriate image list based on mode
-            if self.use_image_orientation:
+            # Select appropriate image list based on mode and per-monitor settings
+            allow_all = self.monitor_allow_all_orientations.get(
+                monitor_id, False)
+
+            if allow_all:
+                # Use all images if "All orientations" is enabled for this monitor
+                image_list = self.image_files
+            elif self.use_image_orientation:
                 # Match image orientation to monitor orientation
                 if orientation == 'Portrait':
                     image_list = self.portrait_images if self.portrait_images else self.image_files
                 else:
+                    # Landscape monitors only use landscape images unless "All orientations" is checked
                     image_list = self.landscape_images if self.landscape_images else self.image_files
             else:
                 # Use all images regardless of orientation
@@ -419,15 +471,35 @@ class WallpaperRotator:
             if not image_list:
                 continue
 
-            index = self.monitor_indices[monitor_id]
-            # Make sure index is within bounds
-            index = index % len(image_list)
-            image_path = image_list[index]
+            # Pick a random image that's not already being used by another monitor
+            attempts = 0
+            max_attempts = min(50, len(image_list))  # Try up to 50 times
+            image_path = None
+
+            while attempts < max_attempts:
+                # Pick a random index
+                index = random.randint(0, len(image_list) - 1)
+                image_path = image_list[index]
+
+                # Check if this image is already being used
+                if image_path not in images_being_used.values():
+                    # Found a unique image
+                    break
+
+                attempts += 1
+
+            # If we couldn't find a unique image after max_attempts, just use the last one tried
+            if image_path is None:
+                index = random.randint(0, len(image_list) - 1)
+                image_path = image_list[index]
+
+            images_being_used[monitor_id] = image_path
+
+            # Store the index for reference (though we'll pick random next time anyway)
+            self.monitor_indices[monitor_id] = index
 
             # Set wallpaper
             if self.set_wallpaper(monitor_id, image_path):
-                self.monitor_indices[monitor_id] = (
-                    index + 1) % len(image_list)
                 wallpapers_set.append(monitor_id)
             else:
                 success = False
@@ -478,6 +550,8 @@ class WallpaperRotator:
         config = {
             'wallpaper_dir': self.wallpaper_dir,
             'active_monitors': self.active_monitors,
+            'monitor_allow_all_orientations': self.monitor_allow_all_orientations,
+            'monitor_rotation_direction': self.monitor_rotation_direction,
             'rotation_interval': self.rotation_interval,
             'use_image_orientation': self.use_image_orientation,
             'wallpaper_position': self.wallpaper_position
@@ -493,6 +567,10 @@ class WallpaperRotator:
                     config = json.load(f)
                     self.wallpaper_dir = config.get('wallpaper_dir')
                     self.active_monitors = config.get('active_monitors', {})
+                    self.monitor_allow_all_orientations = config.get(
+                        'monitor_allow_all_orientations', {})
+                    self.monitor_rotation_direction = config.get(
+                        'monitor_rotation_direction', {})
                     self.rotation_interval = config.get(
                         'rotation_interval', 30)
                     self.use_image_orientation = config.get(
@@ -569,7 +647,7 @@ class WallpaperRotatorGUI:
             self.scrollable_frame, text="Monitor Selection", padding=10)
         monitor_frame.pack(fill='x', padx=10, pady=5)
 
-        ttk.Label(monitor_frame, text="Select monitors to rotate and specify their orientation:").pack(
+        ttk.Label(monitor_frame, text="Configure each monitor's wallpaper settings:").pack(
             anchor='w', pady=5)
 
         # Create checkbox and orientation dropdown for each monitor
@@ -604,7 +682,40 @@ class WallpaperRotatorGUI:
             orientation_combo.bind('<<ComboboxSelected>>',
                                    lambda e, m=monitor, v=orientation_var: self.on_orientation_change(m, v))
 
-            self.monitor_checkboxes.append((monitor, var, orientation_var))
+            # Checkbox for allowing all orientations
+            allow_all_var = tk.BooleanVar(
+                value=self.rotator.monitor_allow_all_orientations.get(
+                    monitor['id'], False)
+            )
+            allow_all_check = ttk.Checkbutton(
+                monitor_row,
+                text="All orientations",
+                variable=allow_all_var,
+                command=lambda m=monitor, v=allow_all_var: self.on_allow_all_orientations_change(
+                    m, v)
+            )
+            allow_all_check.pack(side='left', padx=5)
+
+            # Rotation direction dropdown
+            rotation_var = tk.StringVar(
+                value=self.rotator.monitor_rotation_direction.get(
+                    monitor['id'], 'none')
+            )
+            ttk.Label(monitor_row, text="Rotate:").pack(
+                side='left', padx=(10, 2))
+            rotation_combo = ttk.Combobox(
+                monitor_row,
+                textvariable=rotation_var,
+                values=['none', 'left', 'right'],
+                state='readonly',
+                width=8
+            )
+            rotation_combo.pack(side='left', padx=2)
+            rotation_combo.bind('<<ComboboxSelected>>',
+                                lambda e, m=monitor, v=rotation_var: self.on_rotation_direction_change(m, v))
+
+            self.monitor_checkboxes.append(
+                (monitor, var, orientation_var, allow_all_var, rotation_var))
 
             # Set initial state
             if monitor['id'] in self.rotator.active_monitors:
@@ -790,6 +901,22 @@ class WallpaperRotatorGUI:
             self.log(
                 f"Monitor {monitor['index']} orientation set to {orientation_var.get()}")
             self.rotator.save_config()
+
+    def on_allow_all_orientations_change(self, monitor, allow_all_var):
+        """Handle allow all orientations checkbox change"""
+        self.rotator.monitor_allow_all_orientations[monitor['id']] = allow_all_var.get(
+        )
+        status = "enabled" if allow_all_var.get() else "disabled"
+        self.log(f"Monitor {monitor['index']} all orientations {status}")
+        self.rotator.save_config()
+
+    def on_rotation_direction_change(self, monitor, rotation_var):
+        """Handle rotation direction dropdown change"""
+        self.rotator.monitor_rotation_direction[monitor['id']] = rotation_var.get(
+        )
+        self.log(
+            f"Monitor {monitor['index']} rotation direction set to {rotation_var.get()}")
+        self.rotator.save_config()
 
     def browse_directory(self):
         directory = filedialog.askdirectory()
