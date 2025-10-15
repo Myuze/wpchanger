@@ -36,6 +36,7 @@ desktop.ini
 *.lnk
 wallpaper_rotator_config.json
 .wallpaper_temp/
+MMWP_*
 
 # Shortcut and build helper scripts
 create_shortcut.py

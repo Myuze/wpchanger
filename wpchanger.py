@@ -1175,13 +1175,23 @@ class WallpaperRotatorGUI:
 
     def show_tray_icon(self):
         """Create and show the system tray icon"""
-        # Create tray icon image (use a simple colored square if no icon)
+        # Load tray icon image from file if available
         if not self.icon_image:
+            # Handle PyInstaller bundled resources
+            if getattr(sys, 'frozen', False):
+                # Running as compiled executable
+                base_path = sys._MEIPASS
+            else:
+                # Running as script
+                base_path = os.path.dirname(__file__)
+
+            icon_path = os.path.join(base_path, "MMWP_icon_64x64.png")
             try:
-                self.icon_image = Image.new(
-                    'RGB', (64, 64), color=(70, 130, 180))
+                self.icon_image = Image.open(icon_path)
             except Exception:
-                self.icon_image = None
+                # Fallback: simple colored square
+                self.icon_image = Image.new(
+                    "RGBA", (64, 64), (80, 120, 200, 255))
 
         if self.tray_icon is None:
             try:
