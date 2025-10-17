@@ -689,6 +689,7 @@ class WallpaperRotatorGUI:
         # Auto-start rotation if configured
         if self.rotator.auto_start_rotation and self.rotator.wallpaper_dir:
             self.log("Auto-starting rotation on launch...")
+            self.root.iconify()  # Minimize window
             # Delay slightly to ensure GUI is ready
             self.root.after(500, self.start_rotation)
 
