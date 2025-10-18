@@ -643,6 +643,7 @@ class WallpaperRotatorGUI:
         self.tray_icon = None
         self.icon_image = None
         self.is_tray_active = False
+        self.tray_check_timer_id = None  # Timer for monitoring tray icon
 
         # Create a PanedWindow to split controls and status area
         # Using tk.PanedWindow instead of ttk for better sash visibility/draggability
@@ -1154,6 +1155,9 @@ class WallpaperRotatorGUI:
         # Bind iconify (minimize) event - use after_idle to check state after event completes
         self.root.bind("<Unmap>", self.check_minimized)
 
+        # Start monitoring tray icon status
+        self._monitor_tray_icon()
+
     def check_minimized(self, event):
         """Check if window was actually minimized (not just unmapped for other reasons)"""
         # Use after_idle to check state after the event has been fully processed
@@ -1173,6 +1177,25 @@ class WallpaperRotatorGUI:
         if not self.is_tray_active:
             self.show_tray_icon()
         self.root.withdraw()  # Hide window completely
+
+    def _monitor_tray_icon(self):
+        """Periodically check if tray icon is still active and recreate if needed"""
+        try:
+            # Only monitor if window is hidden/minimized and should be in tray
+            if self.is_tray_active and self.root.state() == 'withdrawn':
+                # Check if tray icon exists and is visible
+                if self.tray_icon is None or not self.tray_icon.visible:
+                    self.log("Tray icon disappeared - recreating...")
+                    self.is_tray_active = False
+                    self.tray_icon = None
+                    self.show_tray_icon()
+        except Exception as e:
+            # Silently handle any errors during monitoring
+            pass
+
+        # Schedule next check in 5 seconds
+        self.tray_check_timer_id = self.root.after(
+            5000, self._monitor_tray_icon)
 
     def show_tray_icon(self):
         """Create and show the system tray icon"""
@@ -1235,10 +1258,7 @@ class WallpaperRotatorGUI:
             self.start_rotation()
         # Update tray menu to reflect new state
         if self.tray_icon:
-            self.tray_icon.stop()
-            self.is_tray_active = False
-            self.tray_icon = None
-            self.show_tray_icon()
+            self.tray_icon.update_menu()
 
     def toggle_auto_start(self, icon=None, item=None):
         """Toggle auto-start rotation on launch"""
@@ -1248,10 +1268,7 @@ class WallpaperRotatorGUI:
         self.log(f"Auto-start rotation {status}")
         # Update tray menu to reflect new state
         if self.tray_icon:
-            self.tray_icon.stop()
-            self.is_tray_active = False
-            self.tray_icon = None
-            self.show_tray_icon()
+            self.tray_icon.update_menu()
 
     def restore_window(self, icon=None, item=None):
         """Restore the window from tray"""
@@ -1265,6 +1282,11 @@ class WallpaperRotatorGUI:
 
     def exit_app(self, icon=None, item=None):
         """Exit the application"""
+        # Cancel tray monitoring timer
+        if self.tray_check_timer_id is not None:
+            self.root.after_cancel(self.tray_check_timer_id)
+            self.tray_check_timer_id = None
+
         # Clean up temp images on exit
         self.rotator.cleanup_temp_images()
         if self.tray_icon:
