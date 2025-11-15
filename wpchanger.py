@@ -20,9 +20,13 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 from ctypes import windll, c_wchar_p, c_uint, Structure, POINTER, byref, c_int
+import ctypes
 
 # Ensure random is properly seeded (important for PyInstaller builds)
 random.seed()
+
+# Windows message for taskbar recreation (sent when Explorer restarts)
+WM_TASKBARCREATED = None
 
 # IDesktopWallpaper interface definitions
 CLSID_DesktopWallpaper = GUID('{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}')
@@ -644,6 +648,13 @@ class WallpaperRotatorGUI:
         self.icon_image = None
         self.is_tray_active = False
         self.tray_check_timer_id = None  # Timer for monitoring tray icon
+        self.hwnd = None  # Window handle for receiving Windows messages
+
+        # Register the TaskbarCreated message
+        global WM_TASKBARCREATED
+        if WM_TASKBARCREATED is None:
+            WM_TASKBARCREATED = win32gui.RegisterWindowMessage(
+                "TaskbarCreated")
 
         # Create a PanedWindow to split controls and status area
         # Using tk.PanedWindow instead of ttk for better sash visibility/draggability
@@ -686,6 +697,9 @@ class WallpaperRotatorGUI:
         self.create_widgets()
         self.update_status()
         self.setup_tray_support()
+
+        # Create message window after GUI is fully initialized
+        self.root.after(100, self._create_message_window)
 
         # Auto-start rotation if configured
         if self.rotator.auto_start_rotation and self.rotator.wallpaper_dir:
@@ -938,7 +952,7 @@ class WallpaperRotatorGUI:
         """Handle monitor checkbox toggle"""
         if var.get():
             # Find the orientation var for this monitor
-            for m, v, o in self.monitor_checkboxes:
+            for m, v, o, allow_all, rot in self.monitor_checkboxes:
                 if m['id'] == monitor['id']:
                     self.rotator.active_monitors[monitor['id']] = o.get()
                     break
@@ -1091,6 +1105,10 @@ class WallpaperRotatorGUI:
                                   if m['id'] in self.rotator.active_monitors])
         self.log(f"Rotation started on: {monitor_list}")
 
+        # Update tray menu to reflect rotation state
+        if self.tray_icon:
+            self.tray_icon.update_menu()
+
         # Schedule the next rotation using tkinter's timer (runs in main thread)
         self._schedule_next_rotation()
 
@@ -1124,6 +1142,10 @@ class WallpaperRotatorGUI:
         self.stop_button.config(state='disabled')
         self.log("Rotation stopped")
 
+        # Update tray menu to reflect rotation state
+        if self.tray_icon:
+            self.tray_icon.update_menu()
+
     def change_now(self):
         if not self.rotator.active_monitors:
             messagebox.showerror("Error", "Please select at least one monitor")
@@ -1147,6 +1169,60 @@ class WallpaperRotatorGUI:
     def update_status(self):
         # Update status periodically
         self.root.after(1000, self.update_status)
+
+    def _create_message_window(self):
+        """Create a hidden window to receive Windows messages like TaskbarCreated"""
+        try:
+            # Get the window handle from tkinter root - use winfo_id() which is more reliable
+            self.root.update_idletasks()
+            self.hwnd = self.root.winfo_id()
+
+            # Set up window procedure to handle messages
+            def wnd_proc(hwnd, msg, wparam, lparam):
+                if msg == WM_TASKBARCREATED:
+                    # TaskbarCreated message received - Explorer restarted
+                    try:
+                        self.root.after(100, self._handle_taskbar_created)
+                    except:
+                        pass
+                # Pass to default handler
+                try:
+                    return win32gui.CallWindowProc(self.old_wnd_proc, hwnd, msg, wparam, lparam)
+                except:
+                    return 0
+
+            # Store the callback to prevent garbage collection
+            self.wnd_proc_callback = ctypes.WINFUNCTYPE(
+                ctypes.c_long, ctypes.c_int, ctypes.c_uint, ctypes.c_int, ctypes.c_int
+            )(wnd_proc)
+
+            # Subclass the window
+            GWL_WNDPROC = -4
+            self.old_wnd_proc = win32gui.SetWindowLong(
+                self.hwnd, GWL_WNDPROC, self.wnd_proc_callback
+            )
+        except Exception as e:
+            # If message window creation fails, fall back to periodic checking
+            # Don't log here as it may be called before log is ready
+            self.hwnd = None
+
+    def _handle_taskbar_created(self):
+        """Handle TaskbarCreated message - Explorer has restarted"""
+        try:
+            if self.is_tray_active:
+                self.log("Explorer restarted - recreating tray icon...")
+                # Stop old icon if it exists
+                if self.tray_icon:
+                    try:
+                        self.tray_icon.stop()
+                    except:
+                        pass
+                    self.tray_icon = None
+                self.is_tray_active = False
+                # Recreate the tray icon
+                self.show_tray_icon()
+        except Exception as e:
+            self.log(f"Error handling taskbar recreation: {e}")
 
     def setup_tray_support(self):
         """Setup system tray icon support"""
@@ -1286,6 +1362,15 @@ class WallpaperRotatorGUI:
         if self.tray_check_timer_id is not None:
             self.root.after_cancel(self.tray_check_timer_id)
             self.tray_check_timer_id = None
+
+        # Restore original window procedure if we subclassed it
+        if self.hwnd and hasattr(self, 'old_wnd_proc'):
+            try:
+                GWL_WNDPROC = -4
+                win32gui.SetWindowLong(
+                    self.hwnd, GWL_WNDPROC, self.old_wnd_proc)
+            except:
+                pass
 
         # Clean up temp images on exit
         self.rotator.cleanup_temp_images()
